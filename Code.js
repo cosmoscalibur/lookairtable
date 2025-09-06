@@ -147,69 +147,74 @@ function getFields(request) {
     request.configParams.tableJson,
   );
 
+  var fieldIds = [];
   tableSchema.fields.forEach(function (field) {
-    switch (field.type) {
-      case "singleLineText":
-      case "multilineText":
-      case "richText":
-      case "email":
-      case "url":
-      case "phoneNumber":
-      case "singleSelect":
-      case "multipleSelects":
-        fields
-          .newDimension()
-          .setId(field.id)
-          .setName(field.name)
-          .setType(types.TEXT);
-        break;
-      case "number":
-      case "currency":
-      case "percent":
-      case "rating":
-        fields
-          .newMetric()
-          .setId(field.id)
-          .setName(field.name)
-          .setType(types.NUMBER);
-        break;
-      case "checkbox":
-        fields
-          .newDimension()
-          .setId(field.id)
-          .setName(field.name)
-          .setType(types.BOOLEAN);
-        break;
-      case "date":
-      case "dateTime":
-        fields
-          .newDimension()
-          .setId(field.id)
-          .setName(field.name)
-          .setType(types.YEAR_MONTH_DAY);
-        break;
-      case "createdTime":
-      case "lastModifiedTime":
-        fields
-          .newDimension()
-          .setId(field.id)
-          .setName(field.name)
-          .setType(types.YEAR_MONTH_DAY_HOUR);
-        break;
-      case "attachment":
-        fields
-          .newDimension()
-          .setId(field.id)
-          .setName(field.name)
-          .setType(types.URL);
-        break;
-      default:
-        fields
-          .newDimension()
-          .setId(field.id)
-          .setName(field.name)
-          .setType(types.TEXT);
-        break;
+    if (fieldIds.indexOf(field.id) === -1) {
+      fieldIds.push(field.id);
+
+      switch (field.type) {
+        case "singleLineText":
+        case "multilineText":
+        case "richText":
+        case "email":
+        case "url":
+        case "phoneNumber":
+        case "singleSelect":
+        case "multipleSelects":
+          fields
+            .newDimension()
+            .setId(field.id)
+            .setName(field.name)
+            .setType(types.TEXT);
+          break;
+        case "number":
+        case "currency":
+        case "percent":
+        case "rating":
+          fields
+            .newMetric()
+            .setId(field.id)
+            .setName(field.name)
+            .setType(types.NUMBER);
+          break;
+        case "checkbox":
+          fields
+            .newDimension()
+            .setId(field.id)
+            .setName(field.name)
+            .setType(types.BOOLEAN);
+          break;
+        case "date":
+        case "dateTime":
+          fields
+            .newDimension()
+            .setId(field.id)
+            .setName(field.name)
+            .setType(types.YEAR_MONTH_DAY);
+          break;
+        case "createdTime":
+        case "lastModifiedTime":
+          fields
+            .newDimension()
+            .setId(field.id)
+            .setName(field.name)
+            .setType(types.YEAR_MONTH_DAY_HOUR);
+          break;
+        case "attachment":
+          fields
+            .newDimension()
+            .setId(field.id)
+            .setName(field.name)
+            .setType(types.URL);
+          break;
+        default:
+          fields
+            .newDimension()
+            .setId(field.id)
+            .setName(field.name)
+            .setType(types.TEXT);
+          break;
+      }
     }
   });
 
@@ -241,7 +246,7 @@ function getData(request) {
   var rows = records.map(function (record) {
     var row = [];
     requestedFields.asArray().forEach(function (field) {
-      var fieldValue = record.fields[field.name];
+      var fieldValue = record.fields[field.getName()];
       row.push(fieldValue);
     });
     return { values: row };
@@ -312,18 +317,15 @@ function testGetData() {
   // 1. Enter your API Key, Base ID, Table JSON, and View ID.
   var request = {
     configParams: {
-      apiKey: "YOUR_API_KEY",
-      baseId: "YOUR_BASE_ID",
-      tableJson:
-        '{"id":"YOUR_TABLE_ID","name":"YOUR_TABLE_NAME","primaryFieldId":"YOUR_PRIMARY_FIELD_ID","fields":[{"id":"field1_id","name":"field1_name","type":"singleLineText"},{"id":"field2_id","name":"field2_name","type":"singleLineText"}],"views":[{"id":"YOUR_VIEW_ID","name":"YOUR_VIEW_NAME","type":"grid"}]}',
-      viewId: "YOUR_VIEW_ID",
+      apiKey: env.API_KEY,
+      baseId: env.BASE_ID,
+      tableJson: tableJson,
+      viewId: env.VIEW_ID,
     },
-    fields: [{ name: "field1_name" }, { name: "field2_name" }],
+    fields: fields,
   };
 
-  // 2. Run this function to test getData.
   var result = getData(request);
 
-  // 3. View the output in the Apps Script console.
   Logger.log(JSON.stringify(result, null, 2));
 }
