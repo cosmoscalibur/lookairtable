@@ -51,17 +51,36 @@ function getConfig(request) {
     );
     var tableSelect = config
       .newSelectSingle()
-      .setId("tableName")
+      .setId("tableJson")
       .setName("Table")
       .setHelpText("Select the table you want to connect to.");
     tables.forEach(function (table) {
       tableSelect.addOption(
-        config.newOptionBuilder().setLabel(table.name).setValue(table.name),
+        config
+          .newOptionBuilder()
+          .setLabel(table.name)
+          .setValue(JSON.stringify(table)),
       );
     });
   }
 
-  if (!request.configParams || !request.configParams.tableName) {
+  if (request.configParams && request.configParams.tableJson) {
+    config.newInfo().setId("instructions4").setText("Step 4: Select View.");
+    var table = JSON.parse(request.configParams.tableJson);
+    var viewSelect = config
+      .newSelectSingle()
+      .setId("viewId")
+      .setName("View")
+      .setHelpText("Select the view you want to connect to.")
+      .setIsDynamic(true);
+    table.views.forEach(function (view) {
+      viewSelect.addOption(
+        config.newOptionBuilder().setLabel(view.name).setValue(view.id),
+      );
+    });
+  }
+
+  if (!request.configParams || !request.configParams.viewId) {
     config.setIsSteppedConfig(true);
   }
 
@@ -125,7 +144,7 @@ function getFields(request) {
   var tableSchema = getAirtableTableSchema(
     request.configParams.apiKey,
     request.configParams.baseId,
-    request.configParams.tableName,
+    request.configParams.tableJson,
   );
 
   tableSchema.fields.forEach(function (field) {
@@ -197,18 +216,15 @@ function getFields(request) {
   return fields;
 }
 
-function getAirtableTableSchema(apiKey, baseId, tableName) {
-  var tables = getAirtableTables(apiKey, baseId);
-  var table = tables.find(function (t) {
-    return t.name === tableName;
-  });
+function getAirtableTableSchema(apiKey, baseId, tableJson) {
+  var table = JSON.parse(tableJson);
 
   if (table) {
     return table;
   } else {
     cc.newUserError()
       .setText("Table not found. Please check the table name.")
-      .setDebugText("Table not found: " + tableName)
+      .setDebugText("Table not found: " + tableJson)
       .throwException();
   }
 }
@@ -240,9 +256,21 @@ function getData(request) {
 function getAirtableRecords(request) {
   var apiKey = request.configParams.apiKey;
   var baseId = request.configParams.baseId;
-  var tableName = request.configParams.tableName;
+  var tableJson = request.configParams.tableJson;
+  var table = JSON.parse(tableJson);
+  var tableName = table.name;
+  var viewId = request.configParams.viewId;
 
   var url = "https://api.airtable.com/v0/" + baseId + "/" + tableName;
+  var queryParams = [];
+  if (viewId) {
+    queryParams.push("view=" + viewId);
+  }
+
+  if (queryParams.length > 0) {
+    url += "?" + queryParams.join("&");
+  }
+
   var options = {
     headers: {
       Authorization: "Bearer " + apiKey,
@@ -255,7 +283,11 @@ function getAirtableRecords(request) {
   do {
     var fullUrl = url;
     if (offset) {
-      fullUrl += "?offset=" + offset;
+      if (url.indexOf("?") > -1) {
+        fullUrl += "&offset=" + offset;
+      } else {
+        fullUrl += "?offset=" + offset;
+      }
     }
 
     try {
