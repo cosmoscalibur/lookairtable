@@ -1,0 +1,15 @@
+{
+  "timeZone": "America/Bogota",
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "dataStudio": {
+    "name": "LookAirTable",
+    "company": "Cosmoscalibur",
+    "companyUrl": "https://www.cosmoscalibur.com/",
+    "logoUrl": "https://www.example.com/logo.png",
+    "addonUrl": "https://www.example.com/addon",
+    "supportUrl": "https://github.com/cosmoscalibur/lookairtable",
+    "description": "Open Source community connector for AirTable",
+    "sources": ["AIRTABLE"]
+  }
+}
