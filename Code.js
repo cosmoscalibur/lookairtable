@@ -119,7 +119,7 @@ function getSchema(request) {
 }
 
 function getFields(request) {
-  var fields = cc.newFields();
+  var fields = cc.getFields();
   var types = cc.FieldType;
 
   var tableSchema = getAirtableTableSchema(
@@ -214,20 +214,25 @@ function getAirtableTableSchema(apiKey, baseId, tableName) {
 }
 
 function getData(request) {
-  var fields = getFields(request);
+  var requestedFieldIds = request.fields.map(function (field) {
+    return field.name;
+  });
+
+  var requestedFields = getFields(request).forIds(requestedFieldIds);
+
   var records = getAirtableRecords(request);
 
   var rows = records.map(function (record) {
     var row = [];
-    fields.build().forEach(function (field) {
-      var fieldValue = record.fields[field.getName()];
+    requestedFields.asArray().forEach(function (field) {
+      var fieldValue = record.fields[field.name];
       row.push(fieldValue);
     });
     return { values: row };
   });
 
   return {
-    schema: fields.build(),
+    schema: requestedFields.build(),
     rows: rows,
   };
 }
