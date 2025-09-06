@@ -307,3 +307,23 @@ function getAirtableRecords(request) {
 
   return records;
 }
+
+function testGetData() {
+  // 1. Enter your API Key, Base ID, Table JSON, and View ID.
+  var request = {
+    configParams: {
+      apiKey: "YOUR_API_KEY",
+      baseId: "YOUR_BASE_ID",
+      tableJson:
+        '{"id":"YOUR_TABLE_ID","name":"YOUR_TABLE_NAME","primaryFieldId":"YOUR_PRIMARY_FIELD_ID","fields":[{"id":"field1_id","name":"field1_name","type":"singleLineText"},{"id":"field2_id","name":"field2_name","type":"singleLineText"}],"views":[{"id":"YOUR_VIEW_ID","name":"YOUR_VIEW_NAME","type":"grid"}]}',
+      viewId: "YOUR_VIEW_ID",
+    },
+    fields: [{ name: "field1_name" }, { name: "field2_name" }],
+  };
+
+  // 2. Run this function to test getData.
+  var result = getData(request);
+
+  // 3. View the output in the Apps Script console.
+  Logger.log(JSON.stringify(result, null, 2));
+}
