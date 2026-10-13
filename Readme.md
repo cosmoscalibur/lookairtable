@@ -17,13 +17,37 @@ A community connector for Google Looker Studio to visualize data from Airtable.
 
 ## Configuration
 
-1. Enter your Airtable API Key.
+1. Authorize with an Airtable
+   [Personal Access Token](https://airtable.com/create/tokens) with scopes
+   `data.records:read` and `schema.bases:read`. The token is stored in the
+   user properties of the script, not in the data source configuration.
 2. Select the Base you want to connect to.
 3. Select the Table you want to connect to.
-4. Select the View you want to get the data from.
+4. Select the View you want to get the data from (its filters and sorting
+   apply).
+
+## Field types
+
+| Airtable                                         | Looker Studio              |
+| ------------------------------------------------ | -------------------------- |
+| number, currency, count, autoNumber              | Number metric (SUM)        |
+| percent                                          | Percent metric (AVG)       |
+| rating                                           | Number metric (AVG)        |
+| duration                                         | Duration metric (SUM)      |
+| checkbox                                         | Boolean                    |
+| date                                             | Date                       |
+| dateTime, createdTime, lastModifiedTime          | Date & time                |
+| url                                              | URL                        |
+| attachment                                       | URL (first attachment)     |
+| formula, rollup                                  | Mapped from result type    |
+| Other (text, selects, collaborators, links, ...) | Text (lists comma-joined)  |
+
+Attachment URLs returned by Airtable expire after a few hours.
 
 ## Development
 
 - The main logic is in the `Code.js` file.
 - The `appsscript.json` file contains the manifest for the Apps Script project.
-- The `testGetData` function in `Code.js` can be used for testing.
+- The `testGetData` function in `Code.js` can be used for testing. It needs
+  credentials stored with `setCredentials({key: "<token>"})` and the script
+  properties `BASE_ID`, `TABLE_ID` and `VIEW_ID`.
