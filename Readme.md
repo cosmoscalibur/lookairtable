@@ -30,7 +30,8 @@ A community connector for Google Looker Studio to visualize data from Airtable.
 
 | Airtable                                         | Looker Studio              |
 | ------------------------------------------------ | -------------------------- |
-| number, currency, count, autoNumber              | Number metric (SUM)        |
+| number, currency, count                          | Number metric (SUM)        |
+| autoNumber                                       | Number dimension           |
 | percent                                          | Percent metric (AVG)       |
 | rating                                           | Number metric (AVG)        |
 | duration                                         | Duration metric (SUM)      |
@@ -38,9 +39,12 @@ A community connector for Google Looker Studio to visualize data from Airtable.
 | date                                             | Date                       |
 | dateTime, createdTime, lastModifiedTime          | Date & time                |
 | url                                              | URL                        |
-| attachment                                       | URL (first attachment)     |
-| formula, rollup                                  | Mapped from result type    |
+| multipleAttachments                              | URL (first attachment)     |
+| formula, rollup, lookup                          | Mapped from result type    |
 | Other (text, selects, collaborators, links, ...) | Text (lists comma-joined)  |
+
+Numeric lookups with several values are summed; other lookups use the first
+value. Form views are not listed because they return no records.
 
 Attachment URLs returned by Airtable expire after a few hours.
 

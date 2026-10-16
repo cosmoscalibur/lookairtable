@@ -7,6 +7,10 @@ var TOKEN_PROPERTY = "airtable.token";
 var CACHE_TTL_SECONDS = 300;
 var MAX_RETRIES = 3;
 var PAGE_SIZE = 100;
+// Apps Script kills executions after 6 minutes; fail with a clear error before.
+var EXEC_BUDGET_MS = 5 * 60 * 1000;
+var EXEC_STARTED = Date.now();
+var _token;
 
 // ---------------------------------------------------------------------------
 // Authentication (Airtable Personal Access Token stored per user)
@@ -25,7 +29,10 @@ function getAuthType() {
 }
 
 function getStoredToken() {
-  return PropertiesService.getUserProperties().getProperty(TOKEN_PROPERTY);
+  if (_token === undefined) {
+    _token = PropertiesService.getUserProperties().getProperty(TOKEN_PROPERTY);
+  }
+  return _token;
 }
 
 function isAuthValid() {
@@ -33,24 +40,30 @@ function isAuthValid() {
 }
 
 function setCredentials(request) {
-  var token = request.key;
+  var token = String(request.key || "").trim();
   if (!token || !validateToken(token)) {
     return { errorCode: "INVALID_CREDENTIALS" };
   }
   PropertiesService.getUserProperties().setProperty(TOKEN_PROPERTY, token);
+  _token = token;
   return { errorCode: "NONE" };
 }
 
 function resetAuth() {
   PropertiesService.getUserProperties().deleteProperty(TOKEN_PROPERTY);
+  _token = null;
 }
 
 function validateToken(token) {
-  var response = UrlFetchApp.fetch(API_BASE_URL + "/meta/whoami", {
-    headers: { Authorization: "Bearer " + token },
-    muteHttpExceptions: true,
-  });
-  return response.getResponseCode() === 200;
+  try {
+    var response = UrlFetchApp.fetch(API_BASE_URL + "/meta/whoami", {
+      headers: { Authorization: "Bearer " + token },
+      muteHttpExceptions: true,
+    });
+    return response.getResponseCode() === 200;
+  } catch (e) {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -73,19 +86,37 @@ function airtableFetch(path, payload) {
     try {
       response = UrlFetchApp.fetch(API_BASE_URL + path, options);
     } catch (e) {
+      if (attempt < MAX_RETRIES) {
+        waitOrFail(1000 * Math.pow(2, attempt), path);
+        continue;
+      }
       throwUserError("Could not reach the Airtable API.", e.toString());
     }
     var code = response.getResponseCode();
     if (code === 200) {
-      return JSON.parse(response.getContentText());
+      try {
+        return JSON.parse(response.getContentText());
+      } catch (e) {
+        throwUserError("Airtable returned an invalid response.", e.toString());
+      }
     }
     if ((code === 429 || code >= 500) && attempt < MAX_RETRIES) {
       // Airtable blocks for 30 seconds after exceeding the rate limit.
-      Utilities.sleep(code === 429 ? 30000 : 1000 * Math.pow(2, attempt));
+      waitOrFail(code === 429 ? 30000 : 1000 * Math.pow(2, attempt), path);
       continue;
     }
     throwAirtableError(code, response.getContentText(), path);
   }
+}
+
+function waitOrFail(ms, path) {
+  if (Date.now() - EXEC_STARTED + ms > EXEC_BUDGET_MS) {
+    throwUserError(
+      "Airtable is rate limiting requests or the table is too large. Try again shortly, or use a view with fewer records.",
+      "Execution time budget exhausted on " + path,
+    );
+  }
+  Utilities.sleep(ms);
 }
 
 function throwAirtableError(code, body, path) {
@@ -99,6 +130,8 @@ function throwAirtableError(code, body, path) {
 
   var text;
   if (code === 401) {
+    // Drop the revoked token so Looker Studio asks for credentials again.
+    resetAuth();
     text = "Airtable rejected the access token. Reset the credentials and enter a valid Personal Access Token.";
   } else if (code === 403) {
     text = "The access token lacks the required scopes (data.records:read, schema.bases:read) or access to this base.";
@@ -106,6 +139,8 @@ function throwAirtableError(code, body, path) {
     text = "The selected base, table or view no longer exists or is not accessible.";
   } else if (code === 429) {
     text = "Airtable rate limit exceeded. Try again in a few seconds.";
+  } else if (code === 422) {
+    text = "Airtable rejected the request: " + detail;
   } else {
     text = "Airtable API error (HTTP " + code + ").";
   }
@@ -120,6 +155,13 @@ function throwUserError(text, debugText) {
 }
 
 function getAirtableBases() {
+  var cache = CacheService.getUserCache();
+  var cacheKey = "bases:" + tokenFingerprint();
+  var cached = cache.get(cacheKey);
+  if (cached) {
+    return JSON.parse(cached);
+  }
+
   var bases = [];
   var offset;
   do {
@@ -129,32 +171,75 @@ function getAirtableBases() {
     bases = bases.concat(data.bases || []);
     offset = data.offset;
   } while (offset);
+  bases = bases.map(function (base) {
+    return { id: base.id, name: base.name };
+  });
+  putCache(cache, cacheKey, bases);
   return bases;
 }
 
-function getAirtableTables(baseId) {
+function putCache(cache, key, value) {
+  try {
+    cache.put(key, JSON.stringify(value), CACHE_TTL_SECONDS);
+  } catch (e) {
+    // Value larger than the cache limit (100KB): skip caching.
+  }
+}
+
+// Keeps only what the connector uses so the base schema fits in the cache.
+function slimTable(table) {
+  return {
+    id: table.id,
+    name: table.name,
+    views: (table.views || []).map(function (view) {
+      return { id: view.id, name: view.name, type: view.type };
+    }),
+    fields: (table.fields || []).map(function (field) {
+      var slim = { id: field.id, name: field.name, type: field.type, description: field.description };
+      var options = field.options || {};
+      var result = options.result;
+      slim.options = {
+        timeZone: options.timeZone,
+        result: result
+          ? { type: result.type, options: result.options && { timeZone: result.options.timeZone } }
+          : undefined,
+      };
+      return slim;
+    }),
+  };
+}
+
+function getAirtableTables(baseId, skipCache) {
   var cache = CacheService.getUserCache();
   var cacheKey = "tables:" + tokenFingerprint() + ":" + baseId;
-  var cached = cache.get(cacheKey);
+  var cached = skipCache ? null : cache.get(cacheKey);
   if (cached) {
     return JSON.parse(cached);
   }
 
-  var tables = airtableFetch("/meta/bases/" + encodeURIComponent(baseId) + "/tables").tables || [];
-  try {
-    cache.put(cacheKey, JSON.stringify(tables), CACHE_TTL_SECONDS);
-  } catch (e) {
-    // Schema larger than the cache value limit (100KB): skip caching.
-  }
+  var tables = (
+    airtableFetch("/meta/bases/" + encodeURIComponent(baseId) + "/tables").tables || []
+  ).map(slimTable);
+  putCache(cache, cacheKey, tables);
   return tables;
 }
 
-function getAirtableTable(baseId, tableId) {
-  var tables = getAirtableTables(baseId);
-  for (var i = 0; i < tables.length; i++) {
-    if (tables[i].id === tableId) {
-      return tables[i];
+function findById(items, id) {
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].id === id) {
+      return items[i];
     }
+  }
+  return null;
+}
+
+function getAirtableTable(baseId, tableId) {
+  // A table created after the cache was filled is looked up again, uncached.
+  var table =
+    findById(getAirtableTables(baseId), tableId) ||
+    findById(getAirtableTables(baseId, true), tableId);
+  if (table) {
+    return table;
   }
   throwUserError(
     "Table not found. Edit the data source and select the table again.",
@@ -162,12 +247,18 @@ function getAirtableTable(baseId, tableId) {
   );
 }
 
+var _fingerprint;
 function tokenFingerprint() {
+  if (_fingerprint && _fingerprint.token === getStoredToken()) {
+    return _fingerprint.value;
+  }
   var digest = Utilities.computeDigest(
     Utilities.DigestAlgorithm.SHA_256,
     getStoredToken() || "",
   );
-  return Utilities.base64EncodeWebSafe(digest).substring(0, 16);
+  var value = Utilities.base64EncodeWebSafe(digest).substring(0, 16);
+  _fingerprint = { token: getStoredToken(), value: value };
+  return value;
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +282,16 @@ function getConfig(request) {
     );
   });
 
+  // Ignore stale selections left over after changing an earlier dynamic step.
+  var tables = params.baseId ? getAirtableTables(params.baseId) : [];
+  var table = params.tableId ? findById(tables, params.tableId) : null;
+  var views = table
+    ? table.views.filter(function (view) {
+        return view.type !== "form";
+      })
+    : [];
+  var hasView = !!(params.viewId && findById(views, params.viewId));
+
   if (params.baseId) {
     config.newInfo().setId("instructions2").setText("Step 2: Select Table.");
     var tableSelect = config
@@ -199,29 +300,28 @@ function getConfig(request) {
       .setName("Table")
       .setHelpText("Select the table you want to connect to.")
       .setIsDynamic(true);
-    getAirtableTables(params.baseId).forEach(function (table) {
+    tables.forEach(function (item) {
       tableSelect.addOption(
-        config.newOptionBuilder().setLabel(table.name).setValue(table.id),
+        config.newOptionBuilder().setLabel(item.name).setValue(item.id),
       );
     });
   }
 
-  if (params.baseId && params.tableId) {
+  if (table) {
     config.newInfo().setId("instructions3").setText("Step 3: Select View.");
-    var table = getAirtableTable(params.baseId, params.tableId);
     var viewSelect = config
       .newSelectSingle()
       .setId("viewId")
       .setName("View")
       .setHelpText("Records are returned with the filters and sorting of this view.");
-    (table.views || []).forEach(function (view) {
+    views.forEach(function (view) {
       viewSelect.addOption(
         config.newOptionBuilder().setLabel(view.name).setValue(view.id),
       );
     });
   }
 
-  if (!params.baseId || !params.tableId || !params.viewId) {
+  if (!table || (views.length > 0 && !hasView)) {
     config.setIsSteppedConfig(true);
   }
 
@@ -252,7 +352,6 @@ function getTypeSpec(airtableType, options) {
     case "number":
     case "currency":
     case "count":
-    case "autoNumber":
       return { metric: true, type: types.NUMBER, aggregation: aggregations.SUM, format: "number" };
     case "percent":
       return { metric: true, type: types.PERCENT, aggregation: aggregations.AVG, format: "number" };
@@ -260,6 +359,8 @@ function getTypeSpec(airtableType, options) {
       return { metric: true, type: types.NUMBER, aggregation: aggregations.AVG, format: "number" };
     case "duration":
       return { metric: true, type: types.DURATION, aggregation: aggregations.SUM, format: "number" };
+    case "autoNumber":
+      return { type: types.NUMBER, format: "number" };
     case "checkbox":
       return { type: types.BOOLEAN, format: "boolean" };
     case "date":
@@ -270,10 +371,11 @@ function getTypeSpec(airtableType, options) {
       return { type: types.YEAR_MONTH_DAY_SECOND, format: "dateTime" };
     case "url":
       return { type: types.URL, format: "text" };
-    case "attachment":
+    case "multipleAttachments":
       return { type: types.URL, format: "attachment" };
     case "formula":
     case "rollup":
+    case "multipleLookupValues":
       if (options && options.result && options.result.type) {
         return getTypeSpec(options.result.type, options.result.options);
       }
@@ -283,13 +385,16 @@ function getTypeSpec(airtableType, options) {
   }
 }
 
+// Date fields keep their zone in options.timeZone; computed fields and
+// created/modified time fields keep it in options.result.options.timeZone.
 function getTimeZone(field) {
   var options = field.options || {};
-  if (field.type === "formula" || field.type === "rollup") {
-    options = (options.result && options.result.options) || {};
-  }
-  var timeZone = options.timeZone;
-  return timeZone && timeZone !== "client" ? timeZone : "UTC";
+  var timeZone =
+    options.timeZone ||
+    (options.result && options.result.options && options.result.options.timeZone);
+  return !timeZone || timeZone === "client" || timeZone.toLowerCase() === "utc"
+    ? "UTC"
+    : timeZone;
 }
 
 function getFieldSpecs(table) {
@@ -345,44 +450,36 @@ function getData(request) {
     specsById[spec.id] = spec;
   });
 
-  var requestedIds = request.fields.map(function (field) {
-    return field.name;
-  });
-  var requestedFields = buildFields(specs).forIds(requestedIds);
-  var requestedSpecs = requestedFields.asArray().map(function (field) {
-    return specsById[field.getId()];
+  var requestedSpecs = (request.fields || []).map(function (field) {
+    var spec = specsById[field.name];
+    if (!spec) {
+      throwUserError(
+        "A field used by this report no longer exists in the Airtable table.",
+        "Unknown field id: " + field.name,
+      );
+    }
+    return spec;
   });
 
   var sampleOnly = !!(request.scriptParams && request.scriptParams.sampleExtraction);
-  var records = getAirtableRecords(
-    params,
-    requestedSpecs.map(function (spec) {
-      return spec.id;
-    }),
-    sampleOnly,
-  );
-
-  var rows = records.map(function (record) {
-    var values = record.fields || {};
-    return {
-      values: requestedSpecs.map(function (spec) {
-        return formatValue(values[spec.id], spec);
-      }),
-    };
-  });
+  var rows = getAirtableRows(params, requestedSpecs, sampleOnly);
 
   return {
-    schema: requestedFields.build(),
+    schema: buildFields(requestedSpecs).build(),
     rows: rows,
   };
 }
 
-function getAirtableRecords(params, fieldIds, sampleOnly) {
+// Fetches the records page by page and converts each one as it arrives, so
+// raw records are not accumulated in memory.
+function getAirtableRows(params, specs, sampleOnly) {
   var path =
     "/" + encodeURIComponent(params.baseId) +
     "/" + encodeURIComponent(params.tableId) + "/listRecords";
   var payload = {
-    fields: fieldIds,
+    fields: specs.map(function (spec) {
+      return spec.id;
+    }),
     pageSize: PAGE_SIZE,
     returnFieldsByFieldId: true,
   };
@@ -390,21 +487,32 @@ function getAirtableRecords(params, fieldIds, sampleOnly) {
     payload.view = params.viewId;
   }
 
-  var records = [];
+  var rows = [];
   do {
     var data = airtableFetch(path, payload);
-    records = records.concat(data.records || []);
+    var records = data.records || [];
+    for (var i = 0; i < records.length; i++) {
+      var cells = records[i].fields || {};
+      var values = new Array(specs.length);
+      for (var j = 0; j < specs.length; j++) {
+        values[j] = formatValue(cells[specs[j].id], specs[j]);
+      }
+      rows.push({ values: values });
+    }
     payload.offset = data.offset;
   } while (payload.offset && !sampleOnly);
 
-  return records;
+  return rows;
 }
 
 // Converts an Airtable cell value to the format Looker Studio expects.
 function formatValue(value, spec) {
   if (spec.format === "boolean") {
-    // Airtable omits unchecked checkboxes.
-    return value === true;
+    // Airtable omits unchecked checkboxes; formulas and lookups may return 1/0 or a list.
+    if (Array.isArray(value)) {
+      value = value[0];
+    }
+    return value === true || value === 1;
   }
   if (value === undefined || value === null) {
     return null;
@@ -412,10 +520,14 @@ function formatValue(value, spec) {
   if (isErrorValue(value)) {
     return null;
   }
-  // Rollups and lookups may return arrays even for scalar result types.
+  // Lookups return arrays even for scalar result types: numbers are added up,
+  // other types use the first value.
   if (Array.isArray(value) && spec.format !== "attachment" && spec.format !== "text") {
+    if (spec.format === "number") {
+      return sumNumbers(value);
+    }
     value = value.length ? value[0] : null;
-    if (value === null) {
+    if (value === null || isErrorValue(value)) {
       return null;
     }
   }
@@ -444,8 +556,24 @@ function isErrorValue(value) {
 }
 
 function parseNumber(value) {
+  if (String(value).trim() === "") {
+    return null;
+  }
   var number = Number(value);
   return isFinite(number) ? number : null;
+}
+
+function sumNumbers(values) {
+  var total = 0;
+  var found = false;
+  for (var i = 0; i < values.length; i++) {
+    var number = typeof values[i] === "number" ? values[i] : parseNumber(values[i]);
+    if (number !== null) {
+      total += number;
+      found = true;
+    }
+  }
+  return found ? total : null;
 }
 
 function formatDate(value) {
@@ -454,11 +582,33 @@ function formatDate(value) {
 }
 
 function formatDateTime(value, timeZone) {
-  var date = new Date(value);
-  if (isNaN(date.getTime())) {
+  var ms = Date.parse(value);
+  if (isNaN(ms)) {
     return null;
   }
-  return Utilities.formatDate(date, timeZone, "yyyyMMddHHmmss");
+  var offset = timeZone === "UTC" ? 0 : getZoneOffset(timeZone, ms);
+  return new Date(ms + offset)
+    .toISOString()
+    .replace(/\D/g, "")
+    .substring(0, 14);
+}
+
+// UTC offset in ms for a zone, cached per 15 minute slot to avoid one
+// Utilities.formatDate service call per cell.
+var _zoneOffsets = {};
+function getZoneOffset(timeZone, ms) {
+  var key = timeZone + ":" + Math.floor(ms / 900000);
+  if (_zoneOffsets[key] === undefined) {
+    var offset = 0;
+    try {
+      var z = Utilities.formatDate(new Date(ms), timeZone, "Z"); // e.g. "-0500"
+      offset = (z.charAt(0) === "-" ? -1 : 1) * (Number(z.substr(1, 2)) * 60 + Number(z.substr(3, 2))) * 60000;
+    } catch (e) {
+      // Unknown time zone: fall back to UTC.
+    }
+    _zoneOffsets[key] = offset;
+  }
+  return _zoneOffsets[key];
 }
 
 function toText(value) {
@@ -466,14 +616,21 @@ function toText(value) {
     return null;
   }
   if (Array.isArray(value)) {
-    return value
+    var items = value
+      .filter(function (item) {
+        return !isErrorValue(item);
+      })
       .map(toText)
       .filter(function (item) {
         return item !== null && item !== "";
-      })
-      .join(", ");
+      });
+    return items.length ? items.join(", ") : null;
   }
   if (typeof value === "object") {
+    // AI text fields keep their content in `value`.
+    if (value.state !== undefined && value.value !== undefined) {
+      return toText(value.value);
+    }
     // Collaborators, attachments, barcodes, buttons and linked records.
     var text = value.name || value.text || value.label || value.filename || value.email || value.url || value.id;
     return text !== undefined ? String(text) : JSON.stringify(value);
