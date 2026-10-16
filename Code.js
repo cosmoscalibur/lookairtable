@@ -7,6 +7,11 @@ var TOKEN_PROPERTY = "airtable.token";
 var CACHE_TTL_SECONDS = 300;
 var MAX_RETRIES = 3;
 var PAGE_SIZE = 100;
+var ROWS_CACHE_TTL_SECONDS = 300;
+// Cache values are limited to 100KB of UTF-8; 30000 chars is at most 90KB.
+var ROWS_CHUNK_CHARS = 30000;
+var ROWS_MAX_CHUNKS = 100;
+var LOCK_WAIT_MS = 30000;
 // Apps Script kills executions after 6 minutes; fail with a clear error before.
 var EXEC_BUDGET_MS = 5 * 60 * 1000;
 var EXEC_STARTED = Date.now();
@@ -470,9 +475,107 @@ function getData(request) {
   };
 }
 
+// Returns the converted rows, served from the user cache when a report with
+// several charts requests the same fields and view within the TTL.
+// The user lock makes concurrent executions wait for the first download
+// instead of all hitting the Airtable rate limit.
+function getAirtableRows(params, specs, sampleOnly) {
+  var key = rowsCacheKey(params, specs);
+  var rows = readRowsCache(key);
+  if (rows) {
+    return sampleOnly ? rows.slice(0, PAGE_SIZE) : rows;
+  }
+  if (sampleOnly) {
+    return fetchAirtableRows(params, specs, true);
+  }
+
+  var lock = LockService.getUserLock();
+  var locked = false;
+  var wait = Math.min(LOCK_WAIT_MS, EXEC_BUDGET_MS - (Date.now() - EXEC_STARTED) - 60000);
+  if (wait > 0) {
+    try {
+      locked = lock.tryLock(wait);
+    } catch (e) {
+      // Proceed without the lock.
+    }
+  }
+  try {
+    if (locked) {
+      rows = readRowsCache(key);
+      if (rows) {
+        return rows;
+      }
+    }
+    rows = fetchAirtableRows(params, specs, false);
+    writeRowsCache(key, rows);
+    return rows;
+  } finally {
+    if (locked) {
+      lock.releaseLock();
+    }
+  }
+}
+
+function rowsCacheKey(params, specs) {
+  var raw = [
+    tokenFingerprint(),
+    params.baseId,
+    params.tableId,
+    params.viewId || "",
+    specs.map(function (spec) {
+      return spec.id;
+    }).join(","),
+  ].join("|");
+  var digest = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, raw);
+  return "rows:" + Utilities.base64EncodeWebSafe(digest);
+}
+
+function readRowsCache(key) {
+  var cache = CacheService.getUserCache();
+  var count = Number(cache.get(key + ":n"));
+  if (!count) {
+    return null;
+  }
+  var keys = [];
+  for (var i = 0; i < count; i++) {
+    keys.push(key + ":" + i);
+  }
+  var chunks = cache.getAll(keys);
+  var json = "";
+  for (var j = 0; j < keys.length; j++) {
+    if (chunks[keys[j]] === undefined || chunks[keys[j]] === null) {
+      return null; // Evicted or expired in part: treat as a miss.
+    }
+    json += chunks[keys[j]];
+  }
+  try {
+    return JSON.parse(json);
+  } catch (e) {
+    return null;
+  }
+}
+
+function writeRowsCache(key, rows) {
+  var json = JSON.stringify(rows);
+  var count = Math.ceil(json.length / ROWS_CHUNK_CHARS);
+  if (count > ROWS_MAX_CHUNKS) {
+    return; // Too large for the cache: always fetch.
+  }
+  var entries = {};
+  for (var i = 0; i < count; i++) {
+    entries[key + ":" + i] = json.substr(i * ROWS_CHUNK_CHARS, ROWS_CHUNK_CHARS);
+  }
+  entries[key + ":n"] = String(count);
+  try {
+    CacheService.getUserCache().putAll(entries, ROWS_CACHE_TTL_SECONDS);
+  } catch (e) {
+    // Cache quota exceeded: skip caching.
+  }
+}
+
 // Fetches the records page by page and converts each one as it arrives, so
 // raw records are not accumulated in memory.
-function getAirtableRows(params, specs, sampleOnly) {
+function fetchAirtableRows(params, specs, sampleOnly) {
   var path =
     "/" + encodeURIComponent(params.baseId) +
     "/" + encodeURIComponent(params.tableId) + "/listRecords";

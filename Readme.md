@@ -48,6 +48,15 @@ value. Form views are not listed because they return no records.
 
 Attachment URLs returned by Airtable expire after a few hours.
 
+## Caching
+
+Converted rows are cached per user for 5 minutes, keyed by base, table, view
+and the set of requested fields, so charts that request the same fields in one
+report share a single download. Charts with different fields download
+separately; a per-user lock makes concurrent requests wait for the first
+download. Results over roughly 3 MB are not cached. Schema and base lists are
+cached for the same period.
+
 ## Development
 
 - The main logic is in the `Code.js` file.
