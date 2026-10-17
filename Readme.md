@@ -17,14 +17,21 @@ A community connector for Google Looker Studio to visualize data from Airtable.
 
 ## Configuration
 
-1. Authorize with an Airtable
-   [Personal Access Token](https://airtable.com/create/tokens) with scopes
-   `data.records:read` and `schema.bases:read`. The token is stored in the
-   user properties of the script, not in the data source configuration.
-2. Select the Base you want to connect to.
-3. Select the Table you want to connect to.
-4. Select the View you want to get the data from (its filters and sorting
+Authorize with an Airtable
+[Personal Access Token](https://airtable.com/create/tokens) with scopes
+`data.records:read` and `schema.bases:read`. The token is stored in the user
+properties of the script, not in the data source configuration.
+
+Then, in the data source configuration:
+
+1. Select the Base you want to connect to.
+2. Select the Table you want to connect to.
+3. Select the View you want to get the data from (its filters and sorting
    apply).
+
+Data sources created with the previous version stored the API key and the
+table definition in their configuration; they must be reconfigured with these
+steps.
 
 ## Field types
 
@@ -50,12 +57,12 @@ Attachment URLs returned by Airtable expire after a few hours.
 
 ## Caching
 
-Converted rows are cached per user for 5 minutes, keyed by base, table, view
-and the set of requested fields, so charts that request the same fields in one
-report share a single download. Charts with different fields download
-separately; a per-user lock makes concurrent requests wait for the first
-download. Results over roughly 3 MB are not cached. Schema and base lists are
-cached for the same period.
+Converted rows are cached per user, keyed by base, table, view and the ordered
+list of requested fields, so charts that request the same fields in one report
+share a single download. Charts with different fields download separately. A
+per-user lock makes concurrent requests wait, up to a limit, for the first
+download. Results that exceed the cache limits are not cached. Schema and base
+lists use the same cache lifetime.
 
 ## Development
 

@@ -7,7 +7,6 @@ var TOKEN_PROPERTY = "airtable.token";
 var CACHE_TTL_SECONDS = 300;
 var MAX_RETRIES = 3;
 var PAGE_SIZE = 100;
-var ROWS_CACHE_TTL_SECONDS = 300;
 // Cache values are limited to 100KB of UTF-8; 30000 chars is at most 90KB.
 var ROWS_CHUNK_CHARS = 30000;
 var ROWS_MAX_CHUNKS = 100;
@@ -15,7 +14,7 @@ var LOCK_WAIT_MS = 30000;
 // Apps Script kills executions after 6 minutes; fail with a clear error before.
 var EXEC_BUDGET_MS = 5 * 60 * 1000;
 var EXEC_STARTED = Date.now();
-var _token;
+var cachedToken;
 
 // ---------------------------------------------------------------------------
 // Authentication (Airtable Personal Access Token stored per user)
@@ -34,10 +33,10 @@ function getAuthType() {
 }
 
 function getStoredToken() {
-  if (_token === undefined) {
-    _token = PropertiesService.getUserProperties().getProperty(TOKEN_PROPERTY);
+  if (cachedToken === undefined) {
+    cachedToken = PropertiesService.getUserProperties().getProperty(TOKEN_PROPERTY);
   }
-  return _token;
+  return cachedToken;
 }
 
 function isAuthValid() {
@@ -50,25 +49,21 @@ function setCredentials(request) {
     return { errorCode: "INVALID_CREDENTIALS" };
   }
   PropertiesService.getUserProperties().setProperty(TOKEN_PROPERTY, token);
-  _token = token;
+  cachedToken = token;
   return { errorCode: "NONE" };
 }
 
 function resetAuth() {
   PropertiesService.getUserProperties().deleteProperty(TOKEN_PROPERTY);
-  _token = null;
+  cachedToken = null;
 }
 
 function validateToken(token) {
-  try {
-    var response = UrlFetchApp.fetch(API_BASE_URL + "/meta/whoami", {
-      headers: { Authorization: "Bearer " + token },
-      muteHttpExceptions: true,
-    });
-    return response.getResponseCode() === 200;
-  } catch (e) {
-    return false;
-  }
+  var response = UrlFetchApp.fetch(API_BASE_URL + "/meta/whoami", {
+    headers: { Authorization: "Bearer " + token },
+    muteHttpExceptions: true,
+  });
+  return response.getResponseCode() === 200;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,13 +109,17 @@ function airtableFetch(path, payload) {
   }
 }
 
-function waitOrFail(ms, path) {
-  if (Date.now() - EXEC_STARTED + ms > EXEC_BUDGET_MS) {
+function failIfOverBudget(extraMs, path) {
+  if (Date.now() - EXEC_STARTED + extraMs > EXEC_BUDGET_MS) {
     throwUserError(
-      "Airtable is rate limiting requests or the table is too large. Try again shortly, or use a view with fewer records.",
+      "Airtable is taking too long to respond (rate limiting or a table that is too large). Try again shortly, or use a view with fewer records.",
       "Execution time budget exhausted on " + path,
     );
   }
+}
+
+function waitOrFail(ms, path) {
+  failIfOverBudget(ms, path);
   Utilities.sleep(ms);
 }
 
@@ -252,18 +251,12 @@ function getAirtableTable(baseId, tableId) {
   );
 }
 
-var _fingerprint;
 function tokenFingerprint() {
-  if (_fingerprint && _fingerprint.token === getStoredToken()) {
-    return _fingerprint.value;
-  }
   var digest = Utilities.computeDigest(
     Utilities.DigestAlgorithm.SHA_256,
     getStoredToken() || "",
   );
-  var value = Utilities.base64EncodeWebSafe(digest).substring(0, 16);
-  _fingerprint = { token: getStoredToken(), value: value };
-  return value;
+  return Utilities.base64EncodeWebSafe(digest).substring(0, 16);
 }
 
 // ---------------------------------------------------------------------------
@@ -390,8 +383,8 @@ function getTypeSpec(airtableType, options) {
   }
 }
 
-// Date fields keep their zone in options.timeZone; computed fields and
-// created/modified time fields keep it in options.result.options.timeZone.
+// Resolves the zone of a field: date fields keep it in options.timeZone;
+// computed and created/modified time fields in options.result.options.timeZone.
 function getTimeZone(field) {
   var options = field.options || {};
   var timeZone =
@@ -493,18 +486,13 @@ function getAirtableRows(params, specs, sampleOnly) {
   var locked = false;
   var wait = Math.min(LOCK_WAIT_MS, EXEC_BUDGET_MS - (Date.now() - EXEC_STARTED) - 60000);
   if (wait > 0) {
-    try {
-      locked = lock.tryLock(wait);
-    } catch (e) {
-      // Proceed without the lock.
-    }
+    locked = lock.tryLock(wait);
   }
   try {
-    if (locked) {
-      rows = readRowsCache(key);
-      if (rows) {
-        return rows;
-      }
+    // The lock holder may have filled the cache even when the wait expired.
+    rows = readRowsCache(key);
+    if (rows) {
+      return rows;
     }
     rows = fetchAirtableRows(params, specs, false);
     writeRowsCache(key, rows);
@@ -557,24 +545,35 @@ function readRowsCache(key) {
 
 function writeRowsCache(key, rows) {
   var json = JSON.stringify(rows);
-  var count = Math.ceil(json.length / ROWS_CHUNK_CHARS);
-  if (count > ROWS_MAX_CHUNKS) {
-    return; // Too large for the cache: always fetch.
+  var chunks = [];
+  var start = 0;
+  while (start < json.length) {
+    if (chunks.length === ROWS_MAX_CHUNKS) {
+      return; // Too large for the cache: always fetch.
+    }
+    var end = Math.min(start + ROWS_CHUNK_CHARS, json.length);
+    // Splitting a surrogate pair would corrupt the character on reassembly.
+    var last = json.charCodeAt(end - 1);
+    if (end < json.length && last >= 0xd800 && last <= 0xdbff) {
+      end--;
+    }
+    chunks.push(json.substring(start, end));
+    start = end;
   }
   var entries = {};
-  for (var i = 0; i < count; i++) {
-    entries[key + ":" + i] = json.substr(i * ROWS_CHUNK_CHARS, ROWS_CHUNK_CHARS);
-  }
-  entries[key + ":n"] = String(count);
+  chunks.forEach(function (chunk, i) {
+    entries[key + ":" + i] = chunk;
+  });
+  entries[key + ":n"] = String(chunks.length);
   try {
-    CacheService.getUserCache().putAll(entries, ROWS_CACHE_TTL_SECONDS);
+    CacheService.getUserCache().putAll(entries, CACHE_TTL_SECONDS);
   } catch (e) {
     // Cache quota exceeded: skip caching.
   }
 }
 
-// Fetches the records page by page and converts each one as it arrives, so
-// raw records are not accumulated in memory.
+// Fetches the records page by page, converting each page as it arrives and
+// failing before the Apps Script execution limit is reached.
 function fetchAirtableRows(params, specs, sampleOnly) {
   var path =
     "/" + encodeURIComponent(params.baseId) +
@@ -592,6 +591,7 @@ function fetchAirtableRows(params, specs, sampleOnly) {
 
   var rows = [];
   do {
+    failIfOverBudget(0, path);
     var data = airtableFetch(path, payload);
     var records = data.records || [];
     for (var i = 0; i < records.length; i++) {
@@ -696,22 +696,22 @@ function formatDateTime(value, timeZone) {
     .substring(0, 14);
 }
 
-// UTC offset in ms for a zone, cached per 15 minute slot to avoid one
-// Utilities.formatDate service call per cell.
-var _zoneOffsets = {};
+// Returns the UTC offset in ms for a zone, cached per 15 minute slot to avoid
+// one Utilities.formatDate service call per cell.
+var zoneOffsets = {};
 function getZoneOffset(timeZone, ms) {
   var key = timeZone + ":" + Math.floor(ms / 900000);
-  if (_zoneOffsets[key] === undefined) {
+  if (zoneOffsets[key] === undefined) {
     var offset = 0;
     try {
       var z = Utilities.formatDate(new Date(ms), timeZone, "Z"); // e.g. "-0500"
       offset = (z.charAt(0) === "-" ? -1 : 1) * (Number(z.substr(1, 2)) * 60 + Number(z.substr(3, 2))) * 60000;
     } catch (e) {
-      // Unknown time zone: fall back to UTC.
+      Logger.log("Unknown time zone " + timeZone + ": falling back to UTC.");
     }
-    _zoneOffsets[key] = offset;
+    zoneOffsets[key] = offset;
   }
-  return _zoneOffsets[key];
+  return zoneOffsets[key];
 }
 
 function toText(value) {
