@@ -17,13 +17,57 @@ A community connector for Google Looker Studio to visualize data from Airtable.
 
 ## Configuration
 
-1. Enter your Airtable API Key.
-2. Select the Base you want to connect to.
-3. Select the Table you want to connect to.
-4. Select the View you want to get the data from.
+Authorize with an Airtable
+[Personal Access Token](https://airtable.com/create/tokens) with scopes
+`data.records:read` and `schema.bases:read`. The token is stored in the user
+properties of the script, not in the data source configuration.
+
+Then, in the data source configuration:
+
+1. Select the Base you want to connect to.
+2. Select the Table you want to connect to.
+3. Select the View you want to get the data from (its filters and sorting
+   apply).
+
+Data sources created with the previous version stored the API key and the
+table definition in their configuration; they must be reconfigured with these
+steps.
+
+## Field types
+
+| Airtable                                         | Looker Studio              |
+| ------------------------------------------------ | -------------------------- |
+| number, currency, count                          | Number metric (SUM)        |
+| autoNumber                                       | Number dimension           |
+| percent                                          | Percent metric (AVG)       |
+| rating                                           | Number metric (AVG)        |
+| duration                                         | Duration metric (SUM)      |
+| checkbox                                         | Boolean                    |
+| date                                             | Date                       |
+| dateTime, createdTime, lastModifiedTime          | Date & time                |
+| url                                              | URL                        |
+| multipleAttachments                              | URL (first attachment)     |
+| formula, rollup, lookup                          | Mapped from result type    |
+| Other (text, selects, collaborators, links, ...) | Text (lists comma-joined)  |
+
+Numeric lookups with several values are summed; other lookups use the first
+value. Form views are not listed because they return no records.
+
+Attachment URLs returned by Airtable expire after a few hours.
+
+## Caching
+
+Converted rows are cached per user, keyed by base, table, view and the ordered
+list of requested fields, so charts that request the same fields in one report
+share a single download. Charts with different fields download separately. A
+per-user lock makes concurrent requests wait, up to a limit, for the first
+download. Results that exceed the cache limits are not cached. Schema and base
+lists use the same cache lifetime.
 
 ## Development
 
 - The main logic is in the `Code.js` file.
 - The `appsscript.json` file contains the manifest for the Apps Script project.
-- The `testGetData` function in `Code.js` can be used for testing.
+- The `testGetData` function in `Code.js` can be used for testing. It needs
+  credentials stored with `setCredentials({key: "<token>"})` and the script
+  properties `BASE_ID`, `TABLE_ID` and `VIEW_ID`.
